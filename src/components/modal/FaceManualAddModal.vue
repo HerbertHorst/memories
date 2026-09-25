@@ -7,59 +7,85 @@
     <div class="manual-face-add">
       <!-- Step 1: pick a file -->
       <div v-if="!fileId" class="picker-step">
+        <NcNoteCard v-if="loadError" type="error">{{ loadError }}</NcNoteCard>
         <p>{{ t('memories', 'Choose a photo containing the person you want to tag.') }}</p>
         <NcButton type="primary" @click="pickFile">
           {{ t('memories', 'Choose photo') }}
         </NcButton>
       </div>
 
-      <!-- Step 2: draw rectangle -->
+      <!-- Step 2: draw rectangles -->
       <div v-else class="draw-step">
         <!-- Suggestions of already-known person names for the name fields below -->
         <datalist id="memories-manual-face-names">
           <option v-for="n in knownNames" :key="n" :value="n" />
         </datalist>
 
-        <p v-if="!rect" class="hint">
-          {{ t('memories', 'Drag on the photo to mark the face. Existing detections are shown in green.') }}
-        </p>
-        <p v-else class="hint">
-          {{ t('memories', 'Enter a name below. You can redraw by dragging again.') }}
-        </p>
+        <NcNoteCard v-if="loadError" type="error">
+          {{ loadError }}
+          <NcButton type="tertiary" @click="loadFaces">{{ t('memories', 'Try again') }}</NcButton>
+        </NcNoteCard>
 
-        <div
-          ref="stage"
-          class="stage"
-          @mousedown="onDown"
-          @mousemove="onMove"
-          @mouseup="onUp"
-          @mouseleave="onUp"
-          @touchstart.prevent="onTouchDown"
-          @touchmove.prevent="onTouchMove"
-          @touchend.prevent="onUp"
-        >
-          <img ref="image" class="photo" :src="imageSrc" @load="onImageLoad" draggable="false" />
+        <NcNoteCard v-if="!dimensionsKnown" type="warning">
+          {{
+            t(
+              'memories',
+              'The original size of this photo is not known yet, so a marking would end up in the wrong place. Faces can be marked on it once the photo has been indexed.',
+            )
+          }}
+        </NcNoteCard>
 
-          <!-- Existing detected/manual faces -->
-          <div
-            v-for="f in existingFacesDisplay"
-            :key="f.id"
-            class="face-box existing"
-            :class="{ manual: f.isManual, editing: editingFace && editingFace.id === f.id }"
-            :style="f.style"
-            :title="f.personName || t('memories', 'Unnamed person')"
-            @mousedown.stop
-            @touchstart.stop
-            @click.stop="onExistingClick(f.raw)"
-          >
-            <span class="label">{{ f.personName || '?' }}</span>
-          </div>
+        <NcNoteCard v-if="legacy" type="info">
+          {{
+            t(
+              'memories',
+              'Face Recognition on the server does not report the state of the faces. Marking without a name, searching an area and moving a whole group become available once it is updated.',
+            )
+          }}
+        </NcNoteCard>
 
-          <!-- New rectangle being drawn / drawn -->
-          <div v-if="rectDisplay" class="face-box drawing" :style="rectDisplay" />
+        <NcNoteCard v-if="navigationError" type="info">
+          {{
+            t(
+              'memories',
+              'Zooming with two fingers is not available here. Drawing, the buttons and the mouse wheel still work.',
+            )
+          }}
+        </NcNoteCard>
+
+        <p class="hint">{{ hint }}</p>
+
+        <FaceMarkingStage
+          :src="imageSrc"
+          :faces="stageFaces"
+          :regions="stageRegions"
+          :rect="rect"
+          :drawing-enabled="canDraw"
+          @update:rect="onRect"
+          @select="selectFace"
+          @navigation-error="navigationError = true"
+          @image-error="loadError = t('memories', 'The photo could not be loaded.')"
+        />
+
+        <div class="legend">
+          <span><i class="swatch origin-auto" />{{ t('memories', 'Found automatically') }}</span>
+          <span><i class="swatch origin-manual" />✎ {{ t('memories', 'Marked by hand') }}</span>
+          <template v-if="!legacy">
+            <span><i class="swatch line-participating" />{{ t('memories', 'Used for recognition') }}</span>
+            <span><i class="swatch line-pending" />{{ t('memories', 'Waiting') }}</span>
+            <span><i class="swatch line-excluded" />{{ t('memories', 'Not used') }}</span>
+          </template>
         </div>
 
-        <div v-if="rect && !editingFace" class="fields">
+        <div v-if="regions && regions.length" class="regions">
+          <div class="section-title">{{ t('memories', 'Searched areas') }}</div>
+          <ul>
+            <li v-for="region in regions" :key="region.id">{{ regionText(region) }}</li>
+          </ul>
+        </div>
+
+        <!-- A new marking -->
+        <div v-if="rect && !selectedFace" class="fields">
           <NcTextField
             class="field"
             :autofocus="true"
@@ -68,45 +94,84 @@
             :label-visible="false"
             :placeholder="t('memories', 'Name')"
             list="memories-manual-face-names"
-            @keypress.enter="save()"
+            @keypress.enter="saveNamed()"
           />
-          <label class="checkbox-row">
-            <input type="checkbox" v-model="useForClustering" />
-            <span>{{ t('memories', 'Also use this face for automatic recognition') }}</span>
-          </label>
+          <NcNoteCard v-if="saveError" type="error">{{ saveError }}</NcNoteCard>
+          <p class="scope">{{ markingScope }}</p>
+          <p v-if="canSearchRegion" class="scope">{{ t('memories', 'Or search the area:') }} {{ regionScope }}</p>
         </div>
 
-        <div v-if="editingFace" class="fields">
-          <p class="hint">
-            {{ t('memories', 'Reassign this face to a different person (only on this photo).') }}
+        <!-- A face that is there -->
+        <div v-if="selectedFace" class="fields">
+          <div class="face-title">{{ nameOf(selectedFace) }}</div>
+          <p class="state">{{ originText(selectedFace) }}</p>
+          <p v-if="selectedParticipation" class="state">{{ selectedParticipation }}</p>
+          <p v-for="(hintText, i) in selectedHints" :key="i" class="state hint-text">{{ hintText }}</p>
+
+          <template v-if="canReassign">
+            <NcTextField
+              class="field"
+              :autofocus="true"
+              :value.sync="editName"
+              :label="t('memories', 'Name')"
+              :label-visible="false"
+              :placeholder="t('memories', 'Name')"
+              list="memories-manual-face-names"
+              @keypress.enter="saveEdit()"
+            />
+            <p v-if="groupSize !== null" class="group">
+              {{
+                n('memories', 'Its group has {count} face.', 'Its group has {count} faces.', groupSize, {
+                  count: groupSize,
+                })
+              }}
+              <a :href="groupHref" target="_blank" rel="noopener noreferrer">{{
+                t('memories', 'Show the photos of this group')
+              }}</a>
+            </p>
+            <NcCheckboxRadioSwitch v-if="canMoveGroup" :checked.sync="wholeGroup">
+              {{ t('memories', 'Move the whole group') }}
+            </NcCheckboxRadioSwitch>
+            <NcNoteCard v-if="saveError" type="error">{{ saveError }}</NcNoteCard>
+            <p v-if="editTarget" class="scope">{{ reassignScope }}</p>
+          </template>
+          <p v-else class="hint">
+            {{
+              t(
+                'memories',
+                'This face is not in a group yet. It can be named once the face recognition has placed it in one, on its next run.',
+              )
+            }}
           </p>
-          <NcTextField
-            class="field"
-            :autofocus="true"
-            :value.sync="editName"
-            :label="t('memories', 'Name')"
-            :label-visible="false"
-            :placeholder="t('memories', 'Name')"
-            list="memories-manual-face-names"
-            @keypress.enter="saveEdit()"
-          />
         </div>
       </div>
     </div>
 
     <template #buttons>
-      <NcButton v-if="fileId && !rect && !editingFace" @click="resetFile">
+      <NcButton v-if="fileId && !rect && !selectedFace" @click="resetFile">
         {{ t('memories', 'Choose different photo') }}
       </NcButton>
-      <NcButton v-if="editingFace" @click="cancelEdit">
-        {{ t('memories', 'Cancel') }}
-      </NcButton>
-      <NcButton v-if="editingFace" class="button" type="primary" :disabled="!canSaveEdit" @click="saveEdit">
-        {{ t('memories', 'Save') }}
-      </NcButton>
-      <NcButton v-if="rect && !editingFace" class="button" type="primary" :disabled="!canSave || saving" @click="save">
-        {{ t('memories', 'Save') }}
-      </NcButton>
+
+      <template v-if="rect && !selectedFace">
+        <NcButton v-if="canSearchRegion" :disabled="saving" @click="saveRegion">
+          {{ t('memories', 'Search area for faces') }}
+        </NcButton>
+        <NcButton v-if="canSaveUnnamed" :disabled="saving" @click="saveUnnamed">
+          {{ t('memories', 'Save without name') }}
+        </NcButton>
+        <NcButton class="button" type="primary" :disabled="!canSaveNamed" @click="saveNamed">
+          {{ t('memories', 'Save') }}
+        </NcButton>
+      </template>
+
+      <template v-if="selectedFace">
+        <NcButton @click="cancelEdit">
+          {{ t('memories', 'Cancel') }}
+        </NcButton>
+        <NcButton v-if="canReassign" class="button" type="primary" :disabled="!canSaveEdit" @click="saveEdit">
+          {{ t('memories', 'Save') }}
+        </NcButton>
+      </template>
     </template>
   </Modal>
 </template>
@@ -114,55 +179,57 @@
 <script lang="ts">
 import { defineComponent } from 'vue';
 import axios from '@nextcloud/axios';
-import { showError, showInfo, showSuccess, getFilePickerBuilder } from '@nextcloud/dialogs';
+import { showSuccess, getFilePickerBuilder } from '@nextcloud/dialogs';
 
 import NcButton from '@nextcloud/vue/dist/Components/NcButton.js';
+import NcNoteCard from '@nextcloud/vue/dist/Components/NcNoteCard.js';
 const NcTextField = () => import('@nextcloud/vue/dist/Components/NcTextField.js');
+const NcCheckboxRadioSwitch = () => import('@nextcloud/vue/dist/Components/NcCheckboxRadioSwitch.js');
 
 import Modal from './Modal.vue';
 import ModalMixin from './ModalMixin';
+import FaceMarkingStage from './FaceMarkingStage.vue';
 
 import { API } from '@services/API';
 import { translate as t } from '@services/l10n';
+import * as utils from '@services/utils';
 import {
   faceRecognitionAddManualFace,
+  faceRecognitionAddManualRegion,
+  faceRecognitionAssignCluster,
   faceRecognitionGetFacesForFile,
-  faceRecognitionReassignFace,
   getFaceList,
+  type IFaceLimits,
   type IFaceRectForFile,
+  type IManualRegion,
 } from '@services/dav/face';
 
-type Rect = { x: number; y: number; w: number; h: number }; // fractions 0..1 of original image
+import {
+  hintsOf,
+  markingScope,
+  nameOf,
+  originText,
+  participationText,
+  reassignScope,
+  regionScope,
+  regionText,
+  stageFaceOf,
+  stageRegionOf,
+  type Rect,
+  type StageFace,
+  type StageRegion,
+} from './faceMarking';
 
-function toCss(r: Rect): Record<string, string> {
-  return {
-    left: `${r.x * 100}%`,
-    top: `${r.y * 100}%`,
-    width: `${r.w * 100}%`,
-    height: `${r.h * 100}%`,
-  };
+/** The answer of the server that came with a failed request, if there was one. */
+function responseOf(e: unknown): { status?: number; data?: { error?: unknown } } | null {
+  if (typeof e !== 'object' || e === null || !('response' in e)) return null;
+  const response = (e as { response?: unknown }).response;
+  return typeof response === 'object' && response !== null ? response : null;
 }
-
-function rectFromPoints(a: { x: number; y: number }, b: { x: number; y: number }): Rect {
-  return {
-    x: Math.min(a.x, b.x),
-    y: Math.min(a.y, b.y),
-    w: Math.abs(a.x - b.x),
-    h: Math.abs(a.y - b.y),
-  };
-}
-
-type FaceDisplay = {
-  id: number;
-  personName: string | null;
-  isManual: boolean;
-  style: Record<string, string>;
-  raw: IFaceRectForFile;
-};
 
 export default defineComponent({
   name: 'FaceManualAddModal',
-  components: { NcButton, NcTextField, Modal },
+  components: { NcButton, NcNoteCard, NcTextField, NcCheckboxRadioSwitch, Modal, FaceMarkingStage },
 
   mixins: [ModalMixin],
 
@@ -175,49 +242,133 @@ export default defineComponent({
     imageSrc: '',
     imageNatW: 0,
     imageNatH: 0,
-    existingFaces: [] as IFaceRectForFile[],
+    faces: [] as IFaceRectForFile[],
+    regions: null as IManualRegion[] | null,
+    limits: null as IFaceLimits | null,
+    legacy: false,
+    loadError: '',
     rect: null as Rect | null,
-    dragStart: null as { x: number; y: number } | null,
     rawInput: '',
-    useForClustering: false,
     saving: false,
-    editingFace: null as IFaceRectForFile | null,
+    saveError: '',
+    selectedFaceId: null as number | null,
     editName: '',
+    wholeGroup: false,
     knownNames: [] as string[],
+    navigationError: false,
   }),
 
   computed: {
-    canSave(): boolean {
-      return !!this.rect && !!this.rawInput.trim() && !this.saving;
+    /** The size of the original photo, which every marking is measured against. */
+    dimensionsKnown(): boolean {
+      return this.imageNatW > 0 && this.imageNatH > 0;
     },
 
-    rectDisplay(): Record<string, string> | null {
-      if (!this.rect) return null;
-      return toCss(this.rect);
+    canDraw(): boolean {
+      return this.dimensionsKnown && !this.saving;
     },
 
-    existingFacesDisplay(): FaceDisplay[] {
-      if (!this.imageNatW || !this.imageNatH) return [];
-      return this.existingFaces.map((f) => ({
-        id: f.id,
-        personName: f.personName,
-        isManual: f.isManual,
-        style: toCss({
-          x: f.x / this.imageNatW,
-          y: f.y / this.imageNatH,
-          w: f.width / this.imageNatW,
-          h: f.height / this.imageNatH,
-        }),
-        raw: f,
-      }));
+    name(): string {
+      return this.rawInput.trim();
+    },
+
+    canSaveNamed(): boolean {
+      return !!this.rect && !!this.name && !this.saving && this.dimensionsKnown;
+    },
+
+    canSaveUnnamed(): boolean {
+      return !this.legacy;
+    },
+
+    canSearchRegion(): boolean {
+      return !this.legacy && this.regions !== null;
+    },
+
+    hint(): string {
+      if (!this.dimensionsKnown) return '';
+      if (this.selectedFace) {
+        return t('memories', 'Draw a new rectangle to mark another face.');
+      }
+      if (this.rect) {
+        return t('memories', 'Enter a name, or save without one. You can redraw by dragging again.');
+      }
+      return t(
+        'memories',
+        'Drag on the photo to mark a face, or an area with several faces to search again. Zoom with the mouse wheel or two fingers, and move with the middle mouse button or two fingers. Click a face to see its state or rename it.',
+      );
+    },
+
+    stageFaces(): StageFace[] {
+      if (!this.dimensionsKnown) return [];
+      return this.faces.map((face) =>
+        stageFaceOf(face, this.imageNatW, this.imageNatH, this.limits, face.id === this.selectedFaceId),
+      );
+    },
+
+    stageRegions(): StageRegion[] {
+      if (!this.dimensionsKnown || !this.regions) return [];
+      return this.regions.map((region) => stageRegionOf(region, this.imageNatW, this.imageNatH));
+    },
+
+    markingScope(): string {
+      return markingScope(this.name, this.knownNames);
+    },
+
+    regionScope(): string {
+      return regionScope();
+    },
+
+    selectedFace(): IFaceRectForFile | null {
+      return this.faces.find((face) => face.id === this.selectedFaceId) ?? null;
+    },
+
+    selectedParticipation(): string {
+      return this.selectedFace ? participationText(this.selectedFace, this.limits) : '';
+    },
+
+    selectedHints(): string[] {
+      return this.selectedFace ? hintsOf(this.selectedFace) : [];
+    },
+
+    /** A face can only be moved to a person through its group. */
+    canReassign(): boolean {
+      return this.selectedFace?.cluster !== null && this.selectedFace?.cluster !== undefined;
+    },
+
+    groupSize(): number | null {
+      return this.selectedFace?.clusterSize ?? null;
+    },
+
+    /** Moving the whole group is offered when there is more in it than this face. */
+    canMoveGroup(): boolean {
+      return !this.legacy && this.groupSize !== null && this.groupSize > 1;
+    },
+
+    groupHref(): string {
+      const cluster = this.selectedFace?.cluster;
+      if (cluster === null || cluster === undefined) return '';
+      return this.$router.resolve({ name: 'facerecognition', params: { user: utils.uid ?? '', name: String(cluster) } })
+        .href;
+    },
+
+    editTarget(): string {
+      return this.editName.trim();
+    },
+
+    reassignScope(): string {
+      return reassignScope(this.editTarget, this.wholeGroup && this.canMoveGroup, this.groupSize);
     },
 
     canSaveEdit(): boolean {
-      return !!this.editingFace && !!this.editName.trim() && !this.saving;
+      return this.canReassign && !!this.editTarget && !this.saving;
     },
   },
 
   methods: {
+    nameOf,
+    originText,
+    regionText,
+
     open() {
       this.resetAll();
       this.show = true;
@@ -229,27 +380,49 @@ export default defineComponent({
       this.show = true;
       this.loadKnownNames();
       if (!info?.fileid) return;
-      try {
-        this.fileId = info.fileid;
-        this.imageNatW = info.w ?? 0;
-        this.imageNatH = info.h ?? 0;
-        this.imageSrc = API.Q(API.IMAGE_PREVIEW(this.fileId), {
-          c: info.etag,
-          x: 2048,
-          y: 2048,
-          a: '1',
-        });
-        this.existingFaces = await faceRecognitionGetFacesForFile(this.fileId);
-      } catch (e) {
-        console.error(e);
-        showError(t('memories', 'Failed to load the selected photo.'));
-        this.resetFile();
-      }
+
+      this.fileId = info.fileid;
+      // Only the size of the original is any good: a marking is measured
+      // against it, and the preview is scaled down.
+      this.imageNatW = info.w ?? 0;
+      this.imageNatH = info.h ?? 0;
+      this.imageSrc = this.previewOf(this.fileId, info.etag);
+      await this.loadFaces();
     },
 
     cleanup() {
       this.show = false;
       this.resetAll();
+    },
+
+    previewOf(fileId: number, etag?: string): string {
+      return API.Q(API.IMAGE_PREVIEW(fileId), { c: etag, x: 2048, y: 2048, a: '1' });
+    },
+
+    /**
+     * Load the faces of the photo, with their state, and the regions queued
+     * on it. A failure is shown here, and leaves the rest of the app alone.
+     */
+    async loadFaces(): Promise<void> {
+      const fileId = this.fileId;
+      if (!fileId) return;
+      this.loadError = '';
+      try {
+        const result = await faceRecognitionGetFacesForFile(fileId);
+        // The dialog moved on to another photo, or was closed, meanwhile.
+        if (fileId !== this.fileId) return;
+        this.faces = result.faces;
+        this.regions = result.regions;
+        this.limits = result.limits;
+        this.legacy = result.legacy;
+        if (this.selectedFaceId !== null && !this.selectedFace) {
+          this.selectedFaceId = null;
+        }
+      } catch (e) {
+        console.error(e);
+        if (fileId !== this.fileId) return;
+        this.loadError = this.errorText(e, t('memories', 'The faces of this photo could not be loaded.'));
+      }
     },
 
     /**
@@ -272,26 +445,28 @@ export default defineComponent({
     },
 
     resetAll() {
-      this.fileId = 0;
-      this.imageSrc = '';
-      this.imageNatW = 0;
-      this.imageNatH = 0;
-      this.existingFaces = [];
-      this.rect = null;
-      this.dragStart = null;
-      this.rawInput = '';
-      this.useForClustering = false;
-      this.saving = false;
-      this.editingFace = null;
-      this.editName = '';
+      this.resetFile();
+      this.knownNames = [];
+      this.navigationError = false;
     },
 
     resetFile() {
       this.fileId = 0;
       this.imageSrc = '';
+      this.imageNatW = 0;
+      this.imageNatH = 0;
+      this.faces = [];
+      this.regions = null;
+      this.limits = null;
+      this.legacy = false;
+      this.loadError = '';
       this.rect = null;
-      this.existingFaces = [];
-      this.imageNatW = this.imageNatH = 0;
+      this.rawInput = '';
+      this.saving = false;
+      this.saveError = '';
+      this.selectedFaceId = null;
+      this.editName = '';
+      this.wholeGroup = false;
     },
 
     async pickFile(): Promise<void> {
@@ -319,28 +494,19 @@ export default defineComponent({
 
     async loadPhotoByPath(path: string): Promise<void> {
       try {
-        // Fetch fileinfo (fileid, w, h, etag) via Memories image info by path.
-        // Memories' IMAGE_INFO requires fileid; so we first look the file up via WebDAV.
+        // Memories' IMAGE_INFO requires a fileid, so the file is looked up via WebDAV.
         const props = await this.webdavFileInfo(path);
         this.fileId = props.fileid;
-        this.imageNatW = props.w ?? 0;
-        this.imageNatH = props.h ?? 0;
-
-        // Preview source large enough to draw comfortably.
-        this.imageSrc = API.Q(API.IMAGE_PREVIEW(this.fileId), {
-          c: props.etag,
-          x: 2048,
-          y: 2048,
-          a: '1',
-        });
-
-        // Fetch existing faces for this file.
-        this.existingFaces = await faceRecognitionGetFacesForFile(this.fileId);
+        this.imageNatW = props.w;
+        this.imageNatH = props.h;
+        this.imageSrc = this.previewOf(this.fileId, props.etag);
       } catch (e) {
         console.error(e);
-        showError(t('memories', 'Failed to load the selected photo.'));
         this.resetFile();
+        this.loadError = t('memories', 'Failed to load the selected photo.');
+        return;
       }
+      await this.loadFaces();
     },
 
     async webdavFileInfo(path: string): Promise<{ fileid: number; etag: string; w: number; h: number }> {
@@ -371,6 +537,8 @@ export default defineComponent({
       const etag = (doc.getElementsByTagNameNS('DAV:', 'getetag')[0]?.textContent ?? '').replace(/"/g, '');
       const sizeEl =
         doc.getElementsByTagNameNS('http://nextcloud.org/ns', 'metadata-photos-size')[0]?.textContent ?? '';
+      // Without the size of the original the photo is shown, but nothing can
+      // be marked on it: the size of the preview would put it elsewhere.
       let w = 0,
         h = 0;
       const m = sizeEl.match(/(\d+)[^\d]+(\d+)/);
@@ -381,136 +549,140 @@ export default defineComponent({
       return { fileid, etag, w, h };
     },
 
-    onImageLoad() {
-      const img = this.$refs.image as HTMLImageElement;
-      // Preview is scaled down — we still need original dims. If PROPFIND didn't give them,
-      // assume the preview ratio matches original and use preview natural size as a fallback.
-      if (!this.imageNatW || !this.imageNatH) {
-        this.imageNatW = img.naturalWidth;
-        this.imageNatH = img.naturalHeight;
+    onRect(rect: Rect | null) {
+      this.rect = rect;
+      if (rect) {
+        this.selectedFaceId = null;
+        this.saveError = '';
       }
     },
 
-    stagePoint(ev: MouseEvent | Touch): { x: number; y: number } | null {
-      const img = this.$refs.image as HTMLImageElement | undefined;
-      if (!img) return null;
-      const rect = img.getBoundingClientRect();
-      const x = (ev.clientX - rect.left) / rect.width;
-      const y = (ev.clientY - rect.top) / rect.height;
-      return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
-    },
-
-    onDown(ev: MouseEvent) {
-      if (this.editingFace) return;
-      const p = this.stagePoint(ev);
-      if (!p) return;
-      this.dragStart = p;
-      this.rect = { x: p.x, y: p.y, w: 0, h: 0 };
-    },
-    onMove(ev: MouseEvent) {
-      if (!this.dragStart) return;
-      const p = this.stagePoint(ev);
-      if (!p) return;
-      this.rect = rectFromPoints(this.dragStart, p);
-    },
-    onTouchDown(ev: TouchEvent) {
-      if (this.editingFace) return;
-      const t0 = ev.touches[0];
-      if (!t0) return;
-      const p = this.stagePoint(t0);
-      if (!p) return;
-      this.dragStart = p;
-      this.rect = { x: p.x, y: p.y, w: 0, h: 0 };
-    },
-    onTouchMove(ev: TouchEvent) {
-      if (!this.dragStart) return;
-      const t0 = ev.touches[0];
-      if (!t0) return;
-      const p = this.stagePoint(t0);
-      if (!p) return;
-      this.rect = rectFromPoints(this.dragStart, p);
-    },
-    onUp() {
-      if (!this.rect) {
-        this.dragStart = null;
-        return;
-      }
-      // Discard micro-clicks.
-      if (this.rect.w < 0.01 || this.rect.h < 0.01) this.rect = null;
-      this.dragStart = null;
-    },
-
-    onExistingClick(f: IFaceRectForFile) {
+    selectFace(faceId: number) {
+      // While saving, the rectangle has to stay, to try again if it fails.
+      if (this.saving) return;
+      const face = this.faces.find((f) => f.id === faceId);
+      if (!face) return;
       this.rect = null;
-      this.dragStart = null;
-      this.editingFace = f;
-      this.editName = f.personName ?? '';
+      this.saveError = '';
+      this.selectedFaceId = faceId;
+      this.editName = face.personName ?? '';
+      // Only this face, unless the user says otherwise.
+      this.wholeGroup = false;
     },
 
     cancelEdit() {
-      this.editingFace = null;
+      this.selectedFaceId = null;
       this.editName = '';
+      this.saveError = '';
+    },
+
+    /** The rectangle as the server takes it, measured against the original. */
+    manualRect() {
+      const rect = this.rect!;
+      return {
+        fileId: this.fileId,
+        x: rect.x,
+        y: rect.y,
+        width: rect.w,
+        height: rect.h,
+        imageWidth: this.imageNatW,
+        imageHeight: this.imageNatH,
+      };
+    },
+
+    saveNamed(): Promise<void> {
+      return this.canSaveNamed ? this.saveMarking(this.name) : Promise.resolve();
+    },
+
+    saveUnnamed(): Promise<void> {
+      return this.canSaveUnnamed ? this.saveMarking('') : Promise.resolve();
+    },
+
+    /**
+     * Saves the rectangle as a face, and keeps the dialog open for the next
+     * one. If saving fails, the rectangle stays, to try again.
+     */
+    async saveMarking(personName: string): Promise<void> {
+      if (!this.rect || !this.fileId || !this.dimensionsKnown || this.saving) return;
+      this.saving = true;
+      this.saveError = '';
+      try {
+        await faceRecognitionAddManualFace({ ...this.manualRect(), personName });
+        showSuccess(
+          personName
+            ? t('memories', 'Person "{name}" tagged.', { name: personName })
+            : t('memories', 'Face marked. The face recognition will look for the person on its next run.'),
+        );
+        this.rect = null;
+        this.rawInput = '';
+        this.$emit('added', personName);
+      } catch (e) {
+        console.error(e);
+        this.saveError = this.errorText(e, t('memories', 'Failed to save the manual face.'));
+        return;
+      } finally {
+        this.saving = false;
+      }
+      await this.loadFaces();
+    },
+
+    async saveRegion(): Promise<void> {
+      if (!this.rect || !this.fileId || !this.dimensionsKnown || this.saving || !this.canSearchRegion) return;
+      this.saving = true;
+      this.saveError = '';
+      try {
+        await faceRecognitionAddManualRegion(this.manualRect());
+        showSuccess(t('memories', 'The area will be searched for faces on the next run of the face recognition.'));
+        this.rect = null;
+        this.rawInput = '';
+      } catch (e) {
+        console.error(e);
+        this.saveError = this.errorText(e, t('memories', 'The area could not be queued for a search.'));
+        return;
+      } finally {
+        this.saving = false;
+      }
+      await this.loadFaces();
     },
 
     async saveEdit(): Promise<void> {
-      if (!this.canSaveEdit || !this.editingFace) return;
-      const target = this.editName.trim();
-      const faceId = this.editingFace.id;
+      const face = this.selectedFace;
+      if (!this.canSaveEdit || !face || face.cluster === null) return;
+      const target = this.editTarget;
+      const wholeGroup = this.wholeGroup && this.canMoveGroup;
       this.saving = true;
+      this.saveError = '';
       try {
-        await faceRecognitionReassignFace(faceId, target);
-        showSuccess(t('memories', 'Face reassigned to "{name}".', { name: target }));
-        this.editingFace = null;
+        await faceRecognitionAssignCluster(face.cluster, target, wholeGroup ? undefined : face.id);
+        showSuccess(
+          wholeGroup
+            ? t('memories', 'Group assigned to "{name}".', { name: target })
+            : t('memories', 'Face reassigned to "{name}".', { name: target }),
+        );
+        this.selectedFaceId = null;
         this.editName = '';
-        if (this.fileId) {
-          this.existingFaces = await faceRecognitionGetFacesForFile(this.fileId);
-        }
         this.$emit('added', target);
       } catch (e) {
         console.error(e);
-        showError(t('memories', 'Failed to reassign the face.'));
+        this.saveError = this.errorText(e, t('memories', 'Failed to reassign the face.'));
+        return;
       } finally {
         this.saving = false;
       }
+      await this.loadFaces();
     },
 
-    async save(): Promise<void> {
-      if (!this.canSave || !this.rect || !this.fileId) return;
-      if (!this.imageNatW || !this.imageNatH) {
-        showError(t('memories', 'Could not determine image dimensions.'));
-        return;
+    /** What went wrong with a call to the server, in words. */
+    errorText(e: unknown, fallback: string): string {
+      const response = responseOf(e);
+      if (response?.status === 503) {
+        return t('memories', 'Face Recognition on the server has to be updated first.');
       }
-      this.saving = true;
-      try {
-        const result = await faceRecognitionAddManualFace({
-          fileId: this.fileId,
-          personName: this.rawInput.trim(),
-          x: this.rect.x,
-          y: this.rect.y,
-          width: this.rect.w,
-          height: this.rect.h,
-          imageWidth: this.imageNatW,
-          imageHeight: this.imageNatH,
-          useForClustering: this.useForClustering,
-        });
-        showSuccess(t('memories', 'Person "{name}" tagged.', { name: this.rawInput.trim() }));
-        if (this.useForClustering && result.clusteringQueued) {
-          showInfo(
-            t(
-              'memories',
-              'Saved for "{name}". The next background scan will look for a face in the marked area and, if one is found, use it for automatic recognition.',
-              { name: this.rawInput.trim() },
-            ),
-          );
-        }
-        this.$emit('added', this.rawInput.trim());
-        await this.close();
-      } catch (e) {
-        console.error(e);
-        showError(t('memories', 'Failed to save the manual face.'));
-      } finally {
-        this.saving = false;
+      if (response?.status === 409) {
+        return t('memories', 'The face has moved to another group in the meantime. Please check it and try again.');
       }
+      const detail = response?.data?.error;
+      return detail ? `${fallback} (${String(detail)})` : fallback;
     },
   },
 });
@@ -545,60 +717,54 @@ export default defineComponent({
   margin: 0;
 }
 
-.stage {
-  position: relative;
-  user-select: none;
-  display: inline-block;
-  max-width: 100%;
-  align-self: center;
-  cursor: crosshair;
-  background: var(--color-background-dark);
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  justify-content: center;
+  font-size: 0.85em;
+  opacity: 0.85;
 
-  .photo {
-    display: block;
-    max-width: 100%;
-    max-height: 70vh;
-    height: auto;
-    pointer-events: none;
+  span {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
   }
 
-  .face-box {
-    position: absolute;
-    box-sizing: border-box;
-    pointer-events: none;
+  .swatch {
+    display: inline-block;
+    width: 16px;
+    height: 10px;
+    border: 2px solid #95a5a6;
 
-    &.existing {
-      border: 2px solid #2ecc71;
-      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.4);
-      pointer-events: auto;
-      cursor: pointer;
-
-      &.manual {
-        border-color: #f1c40f;
-      }
-
-      &.editing {
-        border-color: #e67e22;
-        box-shadow: 0 0 0 2px rgba(230, 126, 34, 0.5);
-      }
-
-      .label {
-        position: absolute;
-        bottom: -1.4em;
-        left: 0;
-        font-size: 11px;
-        background: rgba(0, 0, 0, 0.65);
-        color: #fff;
-        padding: 1px 4px;
-        border-radius: 2px;
-        white-space: nowrap;
-      }
+    &.origin-auto {
+      border-color: #2ecc71;
     }
-
-    &.drawing {
-      border: 2px dashed #3498db;
-      background: rgba(52, 152, 219, 0.15);
+    &.origin-manual {
+      border-color: #f1c40f;
     }
+    &.line-pending {
+      border-style: dashed;
+    }
+    &.line-excluded {
+      border-style: dotted;
+      border-width: 3px;
+    }
+  }
+}
+
+.regions {
+  font-size: 0.9em;
+
+  .section-title {
+    font-weight: bold;
+    margin-bottom: 2px;
+  }
+
+  ul {
+    margin: 0;
+    padding-left: 18px;
+    list-style: disc;
   }
 }
 
@@ -607,13 +773,27 @@ export default defineComponent({
   flex-direction: column;
   gap: 8px;
   margin-top: 6px;
-}
 
-.checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 0.9em;
-  cursor: pointer;
+  .face-title {
+    font-weight: bold;
+  }
+
+  .state,
+  .group {
+    margin: 0;
+    font-size: 0.9em;
+  }
+
+  .hint-text {
+    color: var(--color-warning-text, var(--color-warning));
+  }
+
+  .scope {
+    margin: 0;
+    font-size: 0.9em;
+    padding: 6px 8px;
+    border-left: 3px solid var(--color-primary-element);
+    background: var(--color-background-hover);
+  }
 }
 </style>

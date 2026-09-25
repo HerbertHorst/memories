@@ -1,0 +1,284 @@
+import { translate as t, translatePlural as n } from '@services/l10n';
+
+import type { IFaceLimits, IFaceRectForFile, IManualRegion } from '@services/dav/face';
+
+/** A rectangle as fractions 0..1 of the photo. */
+export type Rect = { x: number; y: number; w: number; h: number };
+
+/** A face as the stage draws it. */
+export type StageFace = {
+  id: number;
+  rect: Rect;
+  classes: string[];
+  title: string;
+  label: string;
+};
+
+/** A region as the stage draws it. */
+export type StageRegion = {
+  id: number;
+  rect: Rect;
+  classes: string[];
+  title: string;
+};
+
+export function toCss(r: Rect): Record<string, string> {
+  return {
+    left: `${r.x * 100}%`,
+    top: `${r.y * 100}%`,
+    width: `${r.w * 100}%`,
+    height: `${r.h * 100}%`,
+  };
+}
+
+export function rectFromPoints(a: { x: number; y: number }, b: { x: number; y: number }): Rect {
+  return {
+    x: Math.min(a.x, b.x),
+    y: Math.min(a.y, b.y),
+    w: Math.abs(a.x - b.x),
+    h: Math.abs(a.y - b.y),
+  };
+}
+
+/** A rectangle in pixels of the photo as fractions of it. */
+export function fractionsOf(
+  box: { x: number; y: number; width: number; height: number },
+  width: number,
+  height: number,
+): Rect {
+  return { x: box.x / width, y: box.y / height, w: box.width / width, h: box.height / height };
+}
+
+export type FaceOriginLook = 'auto' | 'manual' | 'unknown';
+export type FaceClusteringLook = 'participating' | 'pending' | 'excluded' | 'none' | 'unknown';
+
+/**
+ * Where a face came from. The server derives it from the state of the face;
+ * an older server does not, and then the manual flag is all there is.
+ */
+export function originOf(face: IFaceRectForFile): FaceOriginLook {
+  if (face.origin === null) return face.isManual ? 'manual' : 'auto';
+  if (face.origin === 'auto' || face.origin === 'manual') return face.origin;
+  return 'unknown';
+}
+
+/** Whether a face takes part in the clustering; 'none' when the server does not say. */
+export function clusteringOf(face: IFaceRectForFile): FaceClusteringLook {
+  if (face.clustering === null) return 'none';
+  if (face.clustering === 'participating' || face.clustering === 'pending' || face.clustering === 'excluded') {
+    return face.clustering;
+  }
+  return 'unknown';
+}
+
+export function nameOf(face: IFaceRectForFile): string {
+  return face.personName || t('memories', 'Unnamed person');
+}
+
+/** Where the face came from, in words. */
+export function originText(face: IFaceRectForFile): string {
+  switch (originOf(face)) {
+    case 'manual':
+      return t('memories', 'Marked by hand.');
+    case 'unknown':
+      return t('memories', 'Origin unknown ({origin}).', { origin: String(face.origin) });
+    default:
+      return face.manualState === 'confirmed'
+        ? t(
+            'memories',
+            'Found by the automatic analysis. It was marked by hand first, and the analysis has found it by itself since.',
+          )
+        : t('memories', 'Found by the automatic analysis.');
+  }
+}
+
+/** Whether the face takes part in the automatic recognition, and why not, in words. */
+export function participationText(face: IFaceRectForFile, limits: IFaceLimits | null): string {
+  switch (clusteringOf(face)) {
+    case 'none':
+      return '';
+    case 'participating':
+      return t('memories', 'Used for the automatic recognition.');
+    case 'pending':
+      return t('memories', 'Waiting for the face recognition: the marked area is searched for a face on its next run.');
+    case 'unknown':
+      return t('memories', 'Unknown state ({state}).', { state: String(face.clustering) });
+  }
+
+  switch (face.excludedReason) {
+    case 'too_small':
+      return limits
+        ? t('memories', 'Not used for the automatic recognition: too small ({size} px, the minimum is {min} px).', {
+            size: Math.min(face.width, face.height),
+            min: limits.minFaceSize,
+          })
+        : t('memories', 'Not used for the automatic recognition: too small.');
+    case 'low_confidence':
+      return limits && face.confidence !== null
+        ? t(
+            'memories',
+            'A face was found here, but the recognition does not trust it enough to assign it automatically (confidence {value}, the threshold is {min}). You can still name it by hand.',
+            { value: face.confidence.toFixed(2), min: limits.minConfidence.toFixed(2) },
+          )
+        : t(
+            'memories',
+            'A face was found here, but the recognition does not trust it enough to assign it automatically. You can still name it by hand.',
+          );
+    case 'no_face':
+      return t(
+        'memories',
+        'No face was recognized in the marked area. The marking stays, but it is not used for the automatic recognition.',
+      );
+    case 'detached':
+      return t('memories', 'Assigned to a person by hand, so the automatic recognition leaves it alone.');
+    default:
+      return t('memories', 'Not used for the automatic recognition (unknown reason: {reason}).', {
+        reason: String(face.excludedReason),
+      });
+  }
+}
+
+/** Further things worth knowing about a face, in words. */
+export function hintsOf(face: IFaceRectForFile): string[] {
+  const hints: string[] = [];
+  if (face.boxAdjusted && originOf(face) === 'manual') {
+    hints.push(
+      t(
+        'memories',
+        'The recognition put the box somewhere else than where it was drawn. If it is not on the face you meant, mark that face again.',
+      ),
+    );
+  }
+  return hints;
+}
+
+/** What a face is, on one line, for when the pointer rests on it. */
+export function titleOf(face: IFaceRectForFile, limits: IFaceLimits | null): string {
+  return [nameOf(face), originText(face), participationText(face, limits), ...hintsOf(face)]
+    .filter((part) => !!part)
+    .join(' — ');
+}
+
+export function stageFaceOf(
+  face: IFaceRectForFile,
+  width: number,
+  height: number,
+  limits: IFaceLimits | null,
+  selected: boolean,
+): StageFace {
+  const origin = originOf(face);
+  return {
+    id: face.id,
+    rect: fractionsOf(face, width, height),
+    classes: ['existing', `origin-${origin}`, `clustering-${clusteringOf(face)}`, ...(selected ? ['selected'] : [])],
+    title: titleOf(face, limits),
+    // Marked by hand shows without colours too.
+    label: (origin === 'manual' ? '✎ ' : '') + (face.personName || '?'),
+  };
+}
+
+/** What came out of the search of a region, in words. */
+export function regionText(region: IManualRegion): string {
+  switch (region.state) {
+    case 'pending':
+      return t('memories', 'Waiting: this area is searched for faces on the next run of the face recognition.');
+    case 'failed':
+      return t('memories', 'The search of this area failed: {error}', { error: region.error ?? '' });
+    case 'done': {
+      if (region.foundCount === 0) {
+        return t('memories', 'No new face was found in this area.');
+      }
+      const found = n('memories', '{count} new face found.', '{count} new faces found.', region.foundCount, {
+        count: region.foundCount,
+      });
+      const excluded: string[] = [];
+      if (region.tooSmallCount > 0) {
+        excluded.push(
+          n('memories', '{count} is too small', '{count} are too small', region.tooSmallCount, {
+            count: region.tooSmallCount,
+          }),
+        );
+      }
+      if (region.lowConfidenceCount > 0) {
+        excluded.push(
+          n('memories', '{count} is not trusted enough', '{count} are not trusted enough', region.lowConfidenceCount, {
+            count: region.lowConfidenceCount,
+          }),
+        );
+      }
+      if (excluded.length === 0) {
+        return found;
+      }
+      return (
+        found +
+        ' ' +
+        t('memories', 'Not used for the automatic recognition: {reasons}.', { reasons: excluded.join(', ') })
+      );
+    }
+    default:
+      return t('memories', 'Unknown state ({state}).', { state: region.state });
+  }
+}
+
+export function stageRegionOf(region: IManualRegion, width: number, height: number): StageRegion {
+  return {
+    id: region.id,
+    rect: fractionsOf(region, width, height),
+    classes: [`region-${region.state}`],
+    title: regionText(region),
+  };
+}
+
+/**
+ * What saving a marking does, for the name entered: nothing but this photo
+ * without a name, a new person with a new one, and with one that exists the
+ * future recognition of that person across the library.
+ */
+export function markingScope(name: string, knownNames: string[]): string {
+  if (!name) {
+    return t(
+      'memories',
+      'Without a name the marking applies to this photo only, until the automatic recognition assigns it to a person. If a face is found in the marked area, it is used for the automatic recognition.',
+    );
+  }
+  if (knownNames.includes(name)) {
+    return t(
+      'memories',
+      '"{name}" already exists: the marking is added to this person. If a face is found in the marked area, it also affects which faces are recognized as "{name}" in your whole library.',
+      { name },
+    );
+  }
+  return t(
+    'memories',
+    'A new person "{name}" is created for this photo. If a face is found in the marked area, it is used to recognize "{name}" automatically.',
+    { name },
+  );
+}
+
+export function regionScope(): string {
+  return t(
+    'memories',
+    'The area is searched for faces on the next run of the face recognition. Every face found in it is added to this photo without a name, and left to the automatic recognition.',
+  );
+}
+
+/**
+ * What assigning an existing face to a person does: that face alone, which
+ * the recognition does not learn from, or its whole group.
+ */
+export function reassignScope(name: string, wholeGroup: boolean, groupSize: number | null): string {
+  if (wholeGroup && groupSize !== null) {
+    return n(
+      'memories',
+      'The whole group, {count} face, is assigned to "{name}", and so are the faces that join it later. Other groups of the same person stay as they are.',
+      'The whole group, {count} faces, is assigned to "{name}", and so are the faces that join it later. Other groups of the same person stay as they are.',
+      groupSize,
+      { count: groupSize, name },
+    );
+  }
+  return t(
+    'memories',
+    'Only this face is assigned to "{name}". The other faces of its current person stay as they are, and this correction does not change the automatic recognition.',
+    { name },
+  );
+}

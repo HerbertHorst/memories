@@ -20,6 +20,8 @@
         list="memories-known-person-names"
         @keypress.enter="save()"
       />
+
+      <p class="scope">{{ scope }}</p>
     </div>
 
     <template #buttons>
@@ -59,6 +61,8 @@ export default defineComponent({
   data: () => ({
     rawInput: String(),
     knownNames: [] as string[],
+    /** Photos of the person, once known */
+    photoCount: null as number | null,
   }),
 
   computed: {
@@ -79,6 +83,32 @@ export default defineComponent({
       // https://github.com/pulsejet/memories/issues/1074
       return this.rawInput.trim();
     },
+
+    /** What renaming affects: every face of the person, and not only one photo. */
+    scope(): string {
+      // An unnamed group is addressed by its number.
+      const isGroup = !isNaN(Number(this.name));
+      if (this.photoCount === null) {
+        return isGroup
+          ? this.t('memories', 'Naming affects all faces of this group, on all of its photos.')
+          : this.t('memories', 'Renaming affects all faces of this person, on all of their photos.');
+      }
+      return isGroup
+        ? this.n(
+            'memories',
+            'Naming affects all faces of this group, on {count} photo.',
+            'Naming affects all faces of this group, on {count} photos.',
+            this.photoCount,
+            { count: this.photoCount },
+          )
+        : this.n(
+            'memories',
+            'Renaming affects all faces of this person, on {count} photo.',
+            'Renaming affects all faces of this person, on {count} photos.',
+            this.photoCount,
+            { count: this.photoCount },
+          );
+    },
   },
 
   methods: {
@@ -89,6 +119,7 @@ export default defineComponent({
       }
 
       this.rawInput = isNaN(Number(this.name)) ? this.name : String();
+      this.photoCount = null;
       this.show = true;
       this.loadKnownNames();
     },
@@ -106,6 +137,8 @@ export default defineComponent({
       try {
         const app = this.routeIsRecognize ? 'recognize' : 'facerecognition';
         const faces = await dav.getFaceList(app);
+        const current = faces.find((f) => String(f.name) === String(this.name));
+        this.photoCount = current ? Number(current.count) : null;
         const names = faces
           .map((f) => f.name)
           // Keep only real names; unnamed clusters expose a numeric id as their name.
@@ -149,5 +182,13 @@ export default defineComponent({
 <style lang="scss" scoped>
 .fields {
   margin-top: 8px;
+
+  .scope {
+    margin: 8px 0 0;
+    font-size: 0.9em;
+    padding: 6px 8px;
+    border-left: 3px solid var(--color-primary-element);
+    background: var(--color-background-hover);
+  }
 }
 </style>
