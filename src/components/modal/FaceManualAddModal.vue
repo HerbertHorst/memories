@@ -228,6 +228,10 @@ import {
 /** How long a saved marking is announced over the photo */
 const NOTICE_MS = 4000;
 
+/** How often, and how far apart, a name field that is still loading is looked for */
+const FOCUS_TRIES = 20;
+const FOCUS_RETRY_MS = 50;
+
 /** The answer of the server that came with a failed request, if there was one. */
 function responseOf(e: unknown): { status?: number; data?: { error?: unknown } } | null {
   if (typeof e !== 'object' || e === null || !('response' in e)) return null;
@@ -433,10 +437,19 @@ export default defineComponent({
      */
     focusField(ref: 'nameField' | 'editField') {
       if (!window.matchMedia?.('(pointer: fine)').matches) return;
-      this.$nextTick(() => {
-        const field = this.$refs[ref] as { $el?: HTMLElement } | undefined;
-        field?.$el?.querySelector('input')?.focus({ preventScroll: true });
-      });
+      // NcTextField is loaded on first use, so the field may take a moment to
+      // be there; it is looked for a few times before giving up.
+      let tries = FOCUS_TRIES;
+      const attempt = () => {
+        const field = this.$refs[ref] as { $el?: Element } | undefined;
+        const input = field?.$el?.querySelector?.('input');
+        if (input) {
+          input.focus({ preventScroll: true });
+        } else if (--tries > 0) {
+          window.setTimeout(attempt, FOCUS_RETRY_MS);
+        }
+      };
+      this.$nextTick(attempt);
     },
 
     previewOf(fileId: number, etag?: string): string {
