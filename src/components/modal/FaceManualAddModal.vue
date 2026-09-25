@@ -791,8 +791,10 @@ export default defineComponent({
   max-width: calc(100% - 24px);
   padding: 8px 14px;
   border-radius: var(--border-radius-large, 10px);
-  background: var(--color-success, #2d7b41);
-  color: var(--color-primary-element-text, #fff);
+  // Dark and see-through, like the labels of the faces: readable on any
+  // photo, in the light and the dark theme alike.
+  background: rgba(0, 0, 0, 0.78);
+  color: #fff;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   font-size: 0.95em;
   text-align: center;
