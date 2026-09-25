@@ -356,6 +356,16 @@ export async function faceRecognitionAddManualRegion(params: IManualRect) {
 }
 
 /**
+ * Name a face that is in no group yet, such as a marking saved without a
+ * name: it gets a group of its own for that person, like a marking saved with
+ * the name. A face in a group is renamed with faceRecognitionAssignCluster.
+ */
+export async function faceRecognitionNameFace(faceId: number, name: string) {
+  const url = generateUrl(`/apps/facerecognition/api/2.0/face/${faceId}/name`);
+  return (await axios.put<{ faceId: number; clusterId: number; personId: number; name: string }>(url, { name })).data;
+}
+
+/**
  * Assign a group (cluster) to a person. With a face, only that face is moved
  * to the person and the other faces of the group stay where they are; without
  * one, the whole group goes to the person.

@@ -113,7 +113,7 @@
           <p v-if="selectedParticipation" class="state">{{ selectedParticipation }}</p>
           <p v-for="(hintText, i) in selectedHints" :key="i" class="state hint-text">{{ hintText }}</p>
 
-          <template v-if="canReassign">
+          <template v-if="canEditName">
             <NcTextField
               ref="editField"
               class="field"
@@ -124,21 +124,22 @@
               list="memories-manual-face-names"
               @keypress.enter="saveEdit()"
             />
-            <p v-if="groupSize !== null" class="group">
+            <p v-if="canReassign && groupSize !== null" class="group">
               {{
                 n('memories', 'Its group has {count} face.', 'Its group has {count} faces.', groupSize, {
                   count: groupSize,
                 })
               }}
-              <a :href="groupHref" target="_blank" rel="noopener noreferrer">{{
-                t('memories', 'Show the photos of this group')
-              }}</a>
+              <a class="group-link" :href="groupHref" target="_blank" rel="noopener noreferrer">
+                {{ t('memories', 'Show the photos of this group') }}
+                <OpenInNewIcon :size="16" />
+              </a>
             </p>
             <NcCheckboxRadioSwitch v-if="canMoveGroup" :checked.sync="wholeGroup">
               {{ t('memories', 'Move the whole group') }}
             </NcCheckboxRadioSwitch>
             <NcNoteCard v-if="saveError" type="error">{{ saveError }}</NcNoteCard>
-            <p v-if="editTarget" class="scope">{{ reassignScope }}</p>
+            <p v-if="editTarget" class="scope">{{ editScope }}</p>
           </template>
           <p v-else class="hint">
             {{
@@ -173,7 +174,7 @@
         <NcButton @click="cancelEdit">
           {{ t('memories', 'Cancel') }}
         </NcButton>
-        <NcButton v-if="canReassign" class="button" type="primary" :disabled="!canSaveEdit" @click="saveEdit">
+        <NcButton v-if="canEditName" class="button" type="primary" :disabled="!canSaveEdit" @click="saveEdit">
           {{ t('memories', 'Save') }}
         </NcButton>
       </template>
@@ -195,6 +196,8 @@ import Modal from './Modal.vue';
 import ModalMixin from './ModalMixin';
 import FaceMarkingStage from './FaceMarkingStage.vue';
 
+import OpenInNewIcon from 'vue-material-design-icons/OpenInNew.vue';
+
 import { API } from '@services/API';
 import { translate as t } from '@services/l10n';
 import * as utils from '@services/utils';
@@ -203,6 +206,7 @@ import {
   faceRecognitionAddManualRegion,
   faceRecognitionAssignCluster,
   faceRecognitionGetFacesForFile,
+  faceRecognitionNameFace,
   getFaceList,
   type IFaceLimits,
   type IFaceRectForFile,
@@ -241,7 +245,7 @@ function responseOf(e: unknown): { status?: number; data?: { error?: unknown } }
 
 export default defineComponent({
   name: 'FaceManualAddModal',
-  components: { NcButton, NcNoteCard, NcTextField, NcCheckboxRadioSwitch, Modal, FaceMarkingStage },
+  components: { NcButton, NcNoteCard, NcTextField, NcCheckboxRadioSwitch, Modal, FaceMarkingStage, OpenInNewIcon },
 
   mixins: [ModalMixin],
 
@@ -357,6 +361,24 @@ export default defineComponent({
       return this.selectedFace?.cluster !== null && this.selectedFace?.cluster !== undefined;
     },
 
+    /**
+     * A face in no group, like a marking saved without a name, is named on
+     * its own and gets a group for that person. Face Recognition before this
+     * change has no way to do that.
+     */
+    canName(): boolean {
+      return !!this.selectedFace && !this.canReassign && !this.legacy;
+    },
+
+    canEditName(): boolean {
+      return this.canReassign || this.canName;
+    },
+
+    /** What saving the name changes, for a face in a group or in none */
+    editScope(): string {
+      return this.canName ? markingScope(this.editTarget, this.knownNames) : this.reassignScope;
+    },
+
     groupSize(): number | null {
       return this.selectedFace?.clusterSize ?? null;
     },
@@ -382,7 +404,7 @@ export default defineComponent({
     },
 
     canSaveEdit(): boolean {
-      return this.canReassign && !!this.editTarget && !this.saving;
+      return this.canEditName && !!this.editTarget && !this.saving;
     },
   },
 
@@ -708,18 +730,23 @@ export default defineComponent({
 
     async saveEdit(): Promise<void> {
       const face = this.selectedFace;
-      if (!this.canSaveEdit || !face || face.cluster === null) return;
+      if (!this.canSaveEdit || !face) return;
       const target = this.editTarget;
       const wholeGroup = this.wholeGroup && this.canMoveGroup;
       this.saving = true;
       this.saveError = '';
       try {
-        await faceRecognitionAssignCluster(face.cluster, target, wholeGroup ? undefined : face.id);
-        this.showNotice(
-          wholeGroup
-            ? t('memories', 'Group assigned to "{name}".', { name: target })
-            : t('memories', 'Face reassigned to "{name}".', { name: target }),
-        );
+        if (face.cluster === null) {
+          await faceRecognitionNameFace(face.id, target);
+          this.showNotice(t('memories', 'Person "{name}" tagged.', { name: target }));
+        } else {
+          await faceRecognitionAssignCluster(face.cluster, target, wholeGroup ? undefined : face.id);
+          this.showNotice(
+            wholeGroup
+              ? t('memories', 'Group assigned to "{name}".', { name: target })
+              : t('memories', 'Face reassigned to "{name}".', { name: target }),
+          );
+        }
         this.selectedFaceId = null;
         this.editName = '';
         this.changed = true;
@@ -877,6 +904,22 @@ export default defineComponent({
   .group {
     margin: 0;
     font-size: 0.9em;
+  }
+
+  // A link has to look like one: the text around it has the same color.
+  .group-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 4px;
+    color: var(--color-primary-element);
+    font-weight: bold;
+    text-decoration: underline;
+
+    &:hover,
+    &:focus-visible {
+      text-decoration-thickness: 2px;
+    }
   }
 
   .hint-text {
