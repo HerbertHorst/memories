@@ -44,7 +44,7 @@
           <span class="label">{{ face.label }}</span>
         </div>
 
-        <div v-if="rect" class="face-box drawing" :style="toCss(rect)" />
+        <div v-if="shownRect" class="face-box drawing" :style="toCss(shownRect)" />
       </div>
     </div>
 
@@ -134,8 +134,12 @@ export default defineComponent({
     ty: 0,
     /** Pointers down on the photo, to tell one finger from two */
     pointerIds: [] as number[],
-    /** The rectangle being drawn, and the one there was before it */
-    draw: null as { pointerId: number; start: Point; before: Rect | null } | null,
+    /**
+     * The rectangle being drawn, shown here while the pointer moves and only
+     * reported when it is let go: the dialog shows its fields for a reported
+     * one, and doing that halfway through the drag moved the page under it.
+     */
+    draw: null as { pointerId: number; start: Point; current: Rect | null } | null,
     /** The photo being moved with the middle mouse button */
     pan: null as { pointerId: number; start: Point; tx: number; ty: number } | null,
     /** A two finger gesture: what the photo was at its start */
@@ -143,6 +147,11 @@ export default defineComponent({
   }),
 
   computed: {
+    /** While drawing, the rectangle being drawn; otherwise the one there is. */
+    shownRect(): Rect | null {
+      return this.draw?.current ?? this.rect;
+    },
+
     contentStyle(): Record<string, string> {
       return { transform: `translate(${this.tx}px, ${this.ty}px) scale(${this.scale})` };
     },
@@ -299,7 +308,7 @@ export default defineComponent({
 
       const point = this.photoPoint(ev.clientX, ev.clientY);
       if (!point) return;
-      this.draw = { pointerId: ev.pointerId, start: point, before: this.rect };
+      this.draw = { pointerId: ev.pointerId, start: point, current: null };
       this.capture(ev);
     },
 
@@ -312,7 +321,7 @@ export default defineComponent({
       if (this.draw && ev.pointerId === this.draw.pointerId) {
         const point = this.photoPoint(ev.clientX, ev.clientY);
         if (point) {
-          this.$emit('update:rect', rectFromPoints(this.draw.start, point));
+          this.draw.current = rectFromPoints(this.draw.start, point);
         }
       }
     },
@@ -326,12 +335,12 @@ export default defineComponent({
       }
 
       if (this.draw && ev.pointerId === this.draw.pointerId) {
-        const drawn = this.rect;
-        // A click is not a rectangle, and must not lose the one there was.
-        if (!drawn || drawn.w < MIN_DRAWN || drawn.h < MIN_DRAWN) {
-          this.$emit('update:rect', this.draw.before);
-        }
+        const drawn = this.draw.current;
         this.draw = null;
+        // A click is not a rectangle, and must not lose the one there was.
+        if (drawn && drawn.w >= MIN_DRAWN && drawn.h >= MIN_DRAWN) {
+          this.$emit('update:rect', drawn);
+        }
       }
     },
 
@@ -345,10 +354,8 @@ export default defineComponent({
       }
     },
 
-    /** Stops drawing, and puts back the rectangle there was before. */
+    /** Stops drawing; the rectangle there was before was never replaced. */
     cancelDrawing() {
-      if (!this.draw) return;
-      this.$emit('update:rect', this.draw.before);
       this.draw = null;
     },
 

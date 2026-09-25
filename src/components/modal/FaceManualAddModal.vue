@@ -55,17 +55,22 @@
 
         <p class="hint">{{ hint }}</p>
 
-        <FaceMarkingStage
-          :src="imageSrc"
-          :faces="stageFaces"
-          :regions="stageRegions"
-          :rect="rect"
-          :drawing-enabled="canDraw"
-          @update:rect="onRect"
-          @select="selectFace"
-          @navigation-error="navigationError = true"
-          @image-error="loadError = t('memories', 'The photo could not be loaded.')"
-        />
+        <div class="stage-wrap">
+          <FaceMarkingStage
+            :src="imageSrc"
+            :faces="stageFaces"
+            :regions="stageRegions"
+            :rect="rect"
+            :drawing-enabled="canDraw"
+            @update:rect="onRect"
+            @select="selectFace"
+            @navigation-error="navigationError = true"
+            @image-error="loadError = t('memories', 'The photo could not be loaded.')"
+          />
+          <transition name="saved-notice">
+            <div v-if="notice" class="saved-notice" role="status">{{ notice }}</div>
+          </transition>
+        </div>
 
         <div class="legend">
           <span><i class="swatch origin-auto" />{{ t('memories', 'Found automatically') }}</span>
@@ -87,8 +92,8 @@
         <!-- A new marking -->
         <div v-if="rect && !selectedFace" class="fields">
           <NcTextField
+            ref="nameField"
             class="field"
-            :autofocus="true"
             :value.sync="rawInput"
             :label="t('memories', 'Name')"
             :label-visible="false"
@@ -110,8 +115,8 @@
 
           <template v-if="canReassign">
             <NcTextField
+              ref="editField"
               class="field"
-              :autofocus="true"
               :value.sync="editName"
               :label="t('memories', 'Name')"
               :label-visible="false"
@@ -179,7 +184,7 @@
 <script lang="ts">
 import { defineComponent } from 'vue';
 import axios from '@nextcloud/axios';
-import { showSuccess, getFilePickerBuilder } from '@nextcloud/dialogs';
+import { getFilePickerBuilder } from '@nextcloud/dialogs';
 
 import NcButton from '@nextcloud/vue/dist/Components/NcButton.js';
 import NcNoteCard from '@nextcloud/vue/dist/Components/NcNoteCard.js';
@@ -220,6 +225,9 @@ import {
   type StageRegion,
 } from './faceMarking';
 
+/** How long a saved marking is announced over the photo */
+const NOTICE_MS = 4000;
+
 /** The answer of the server that came with a failed request, if there was one. */
 function responseOf(e: unknown): { status?: number; data?: { error?: unknown } } | null {
   if (typeof e !== 'object' || e === null || !('response' in e)) return null;
@@ -234,7 +242,8 @@ export default defineComponent({
   mixins: [ModalMixin],
 
   emits: {
-    added: (_name: string) => true,
+    /** Faces were added or moved while the dialog was open; sent when it closes */
+    added: () => true,
   },
 
   data: () => ({
@@ -256,6 +265,15 @@ export default defineComponent({
     wholeGroup: false,
     knownNames: [] as string[],
     navigationError: false,
+    /** What was just saved, shown over the photo for a moment */
+    notice: '',
+    noticeTimer: 0,
+    /**
+     * Whether anything was saved. The sidebar and the timeline are told when
+     * the dialog closes, not on each save: the sidebar reloads by dropping
+     * its content, and this dialog with it.
+     */
+    changed: false,
   }),
 
   computed: {
@@ -371,12 +389,14 @@ export default defineComponent({
 
     open() {
       this.resetAll();
+      this.changed = false;
       this.show = true;
       this.loadKnownNames();
     },
 
     async openForFile(info: { fileid: number; etag?: string; w?: number; h?: number }) {
       this.resetAll();
+      this.changed = false;
       this.show = true;
       this.loadKnownNames();
       if (!info?.fileid) return;
@@ -393,6 +413,30 @@ export default defineComponent({
     cleanup() {
       this.show = false;
       this.resetAll();
+      if (this.changed) {
+        this.changed = false;
+        this.$emit('added');
+      }
+    },
+
+    /** Shows what was just saved over the photo, for a few seconds. */
+    showNotice(text: string) {
+      window.clearTimeout(this.noticeTimer);
+      this.notice = text;
+      this.noticeTimer = window.setTimeout(() => (this.notice = ''), NOTICE_MS);
+    },
+
+    /**
+     * Puts the cursor in a name field without scrolling to it: the field
+     * appears below the photo while the user is still looking at it. Only
+     * with a mouse; on a touch screen the keyboard would cover the photo.
+     */
+    focusField(ref: 'nameField' | 'editField') {
+      if (!window.matchMedia?.('(pointer: fine)').matches) return;
+      this.$nextTick(() => {
+        const field = this.$refs[ref] as { $el?: HTMLElement } | undefined;
+        field?.$el?.querySelector('input')?.focus({ preventScroll: true });
+      });
     },
 
     previewOf(fileId: number, etag?: string): string {
@@ -467,6 +511,8 @@ export default defineComponent({
       this.selectedFaceId = null;
       this.editName = '';
       this.wholeGroup = false;
+      window.clearTimeout(this.noticeTimer);
+      this.notice = '';
     },
 
     async pickFile(): Promise<void> {
@@ -554,6 +600,7 @@ export default defineComponent({
       if (rect) {
         this.selectedFaceId = null;
         this.saveError = '';
+        this.focusField('nameField');
       }
     },
 
@@ -568,6 +615,7 @@ export default defineComponent({
       this.editName = face.personName ?? '';
       // Only this face, unless the user says otherwise.
       this.wholeGroup = false;
+      this.focusField('editField');
     },
 
     cancelEdit() {
@@ -608,14 +656,14 @@ export default defineComponent({
       this.saveError = '';
       try {
         await faceRecognitionAddManualFace({ ...this.manualRect(), personName });
-        showSuccess(
+        this.showNotice(
           personName
             ? t('memories', 'Person "{name}" tagged.', { name: personName })
-            : t('memories', 'Face marked. The face recognition will look for the person on its next run.'),
+            : t('memories', 'Saved. The face recognition will look for the person on its next run.'),
         );
         this.rect = null;
         this.rawInput = '';
-        this.$emit('added', personName);
+        this.changed = true;
       } catch (e) {
         console.error(e);
         this.saveError = this.errorText(e, t('memories', 'Failed to save the manual face.'));
@@ -632,7 +680,7 @@ export default defineComponent({
       this.saveError = '';
       try {
         await faceRecognitionAddManualRegion(this.manualRect());
-        showSuccess(t('memories', 'The area will be searched for faces on the next run of the face recognition.'));
+        this.showNotice(t('memories', 'The area will be searched for faces on the next run of the face recognition.'));
         this.rect = null;
         this.rawInput = '';
       } catch (e) {
@@ -654,14 +702,14 @@ export default defineComponent({
       this.saveError = '';
       try {
         await faceRecognitionAssignCluster(face.cluster, target, wholeGroup ? undefined : face.id);
-        showSuccess(
+        this.showNotice(
           wholeGroup
             ? t('memories', 'Group assigned to "{name}".', { name: target })
             : t('memories', 'Face reassigned to "{name}".', { name: target }),
         );
         this.selectedFaceId = null;
         this.editName = '';
-        this.$emit('added', target);
+        this.changed = true;
       } catch (e) {
         console.error(e);
         this.saveError = this.errorText(e, t('memories', 'Failed to reassign the face.'));
@@ -715,6 +763,38 @@ export default defineComponent({
   font-size: 0.9em;
   opacity: 0.8;
   margin: 0;
+}
+
+.stage-wrap {
+  position: relative;
+}
+
+// Over the photo, so that it moves nothing while it comes and goes.
+.saved-notice {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: calc(100% - 24px);
+  padding: 8px 14px;
+  border-radius: var(--border-radius-large, 10px);
+  background: var(--color-success, #2d7b41);
+  color: var(--color-primary-element-text, #fff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  font-size: 0.95em;
+  text-align: center;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.saved-notice-enter-active,
+.saved-notice-leave-active {
+  transition: opacity 0.25s ease;
+}
+
+.saved-notice-enter,
+.saved-notice-leave-to {
+  opacity: 0;
 }
 
 .legend {
