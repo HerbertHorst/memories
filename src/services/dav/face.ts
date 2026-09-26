@@ -151,7 +151,7 @@ export type FaceOrigin = 'auto' | 'manual';
 export type FaceClustering = 'participating' | 'pending' | 'excluded';
 
 /** Why a face does not take part in the automatic clustering. */
-export type FaceExcludedReason = 'too_small' | 'low_confidence' | 'no_face' | 'detached';
+export type FaceExcludedReason = 'too_small' | 'low_confidence' | 'no_face' | 'detached' | 'ignored';
 
 /** How the search of a face marked by hand ended. */
 export type ManualFaceState = 'pending' | 'found' | 'no_face' | 'confirmed';
@@ -180,6 +180,8 @@ export type IFaceRectForFile = {
   excludedReason: FaceExcludedReason | string | null;
   /** Number of faces of the group, null without a group or when unknown */
   clusterSize: number | null;
+  /** Ignored by the user; null when the server does not say */
+  ignored: boolean | null;
 };
 
 /** A region of a photo queued to be searched for faces again. */
@@ -243,6 +245,7 @@ function toFace(value: unknown): IFaceRectForFile {
     clustering: stringOrNull(raw.clustering),
     excludedReason: stringOrNull(raw.excludedReason),
     clusterSize: numberOrNull(raw.clusterSize),
+    ignored: booleanOrNull(raw.ignored),
   };
 }
 
@@ -363,6 +366,31 @@ export async function faceRecognitionAddManualRegion(params: IManualRect) {
 export async function faceRecognitionNameFace(faceId: number, name: string) {
   const url = generateUrl(`/apps/facerecognition/api/2.0/face/${faceId}/name`);
   return (await axios.put<{ faceId: number; clusterId: number; personId: number; name: string }>(url, { name })).data;
+}
+
+/**
+ * Delete faces put there by hand: markings, and the faces found in a searched
+ * area. The server refuses the whole request if one of them is a face of the
+ * analysis, which can only be ignored.
+ */
+export async function faceRecognitionDeleteFaces(faceIds: number[]) {
+  const url = generateUrl(`/apps/facerecognition/api/2.0/faces/delete`);
+  return (await axios.post<{ faceIds: number[] }>(url, { faceIds })).data;
+}
+
+/**
+ * Ignore faces: they stay on the photo, but are nobody and take no part in
+ * the recognition. Faces ignored already are left as they are.
+ */
+export async function faceRecognitionIgnoreFaces(faceIds: number[]) {
+  const url = generateUrl(`/apps/facerecognition/api/2.0/faces/ignore`);
+  return (await axios.post<{ faceIds: number[] }>(url, { faceIds })).data;
+}
+
+/** Stop ignoring faces: they go back to the recognition. */
+export async function faceRecognitionUnignoreFaces(faceIds: number[]) {
+  const url = generateUrl(`/apps/facerecognition/api/2.0/faces/unignore`);
+  return (await axios.post<{ faceIds: number[] }>(url, { faceIds })).data;
 }
 
 /**

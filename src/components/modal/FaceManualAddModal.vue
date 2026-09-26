@@ -79,6 +79,7 @@
             <span><i class="swatch line-participating" />{{ t('memories', 'Used for recognition') }}</span>
             <span><i class="swatch line-pending" />{{ t('memories', 'Waiting') }}</span>
             <span><i class="swatch line-excluded" />{{ t('memories', 'Not used') }}</span>
+            <span><i class="swatch ignored" />{{ t('memories', 'Ignored') }}</span>
           </template>
         </div>
 
@@ -90,7 +91,7 @@
         </div>
 
         <!-- A new marking -->
-        <div v-if="rect && !selectedFace" class="fields">
+        <div v-if="rect && !selectedFaces.length" class="fields">
           <NcTextField
             ref="nameField"
             class="field"
@@ -124,7 +125,7 @@
               list="memories-manual-face-names"
               @keypress.enter="saveEdit()"
             />
-            <p v-if="canReassign && groupSize !== null" class="group">
+            <p v-if="canReassign && groupSize !== null && !selectedIgnored" class="group">
               {{
                 n('memories', 'Its group has {count} face.', 'Its group has {count} faces.', groupSize, {
                   count: groupSize,
@@ -149,16 +150,30 @@
               )
             }}
           </p>
+          <NcNoteCard v-if="saveError && !canEditName" type="error">{{ saveError }}</NcNoteCard>
+        </div>
+
+        <!-- Several faces, picked with Ctrl+click -->
+        <div v-if="selectedFaces.length > 1" class="fields">
+          <div class="face-title">
+            {{
+              n('memories', '{count} face selected', '{count} faces selected', selectedFaces.length, {
+                count: selectedFaces.length,
+              })
+            }}
+          </div>
+          <p v-for="(note, i) in selectionNotes" :key="i" class="state">{{ note }}</p>
+          <NcNoteCard v-if="saveError" type="error">{{ saveError }}</NcNoteCard>
         </div>
       </div>
     </div>
 
     <template #buttons>
-      <NcButton v-if="fileId && !rect && !selectedFace" @click="resetFile">
+      <NcButton v-if="fileId && !rect && !selectedFaces.length" @click="resetFile">
         {{ t('memories', 'Choose different photo') }}
       </NcButton>
 
-      <template v-if="rect && !selectedFace">
+      <template v-if="rect && !selectedFaces.length">
         <NcButton v-if="canSearchRegion" :disabled="saving" @click="saveRegion">
           {{ t('memories', 'Search area for faces') }}
         </NcButton>
@@ -170,11 +185,31 @@
         </NcButton>
       </template>
 
-      <template v-if="selectedFace">
+      <template v-if="selectedFaces.length">
         <NcButton @click="cancelEdit">
           {{ t('memories', 'Cancel') }}
         </NcButton>
-        <NcButton v-if="canEditName" class="button" type="primary" :disabled="!canSaveEdit" @click="saveEdit">
+        <NcButton
+          v-if="canDeleteSelection"
+          :type="confirmDelete ? 'error' : 'secondary'"
+          :disabled="saving"
+          @click="deleteSelected"
+        >
+          {{ deleteLabel }}
+        </NcButton>
+        <NcButton v-if="canUnignoreSelection" :disabled="saving" @click="unignoreSelected">
+          {{ t('memories', 'Stop ignoring') }}
+        </NcButton>
+        <NcButton v-else-if="canIgnoreSelection" :disabled="saving" @click="ignoreSelected">
+          {{ t('memories', 'Ignore') }}
+        </NcButton>
+        <NcButton
+          v-if="selectedFace && canEditName"
+          class="button"
+          type="primary"
+          :disabled="!canSaveEdit"
+          @click="saveEdit"
+        >
           {{ t('memories', 'Save') }}
         </NcButton>
       </template>
@@ -199,12 +234,15 @@ import FaceMarkingStage from './FaceMarkingStage.vue';
 import OpenInNewIcon from 'vue-material-design-icons/OpenInNew.vue';
 
 import { API } from '@services/API';
-import { translate as t } from '@services/l10n';
+import { translate as t, translatePlural as n } from '@services/l10n';
 import * as utils from '@services/utils';
 import {
   faceRecognitionAddManualFace,
   faceRecognitionAddManualRegion,
   faceRecognitionAssignCluster,
+  faceRecognitionDeleteFaces,
+  faceRecognitionIgnoreFaces,
+  faceRecognitionUnignoreFaces,
   faceRecognitionGetFacesForFile,
   faceRecognitionNameFace,
   getFaceList,
@@ -214,7 +252,9 @@ import {
 } from '@services/dav/face';
 
 import {
+  canDelete,
   hintsOf,
+  isIgnored,
   markingScope,
   nameOf,
   originText,
@@ -268,7 +308,10 @@ export default defineComponent({
     rawInput: '',
     saving: false,
     saveError: '',
-    selectedFaceId: null as number | null,
+    /** The faces selected, in the order they were picked; several with Ctrl+click */
+    selectedFaceIds: [] as number[],
+    /** Delete was clicked once, and waits for the second click that confirms it */
+    confirmDelete: false,
     editName: '',
     wholeGroup: false,
     knownNames: [] as string[],
@@ -312,22 +355,31 @@ export default defineComponent({
 
     hint(): string {
       if (!this.dimensionsKnown) return '';
+      if (this.selectedFaces.length > 1) {
+        return t(
+          'memories',
+          'Ctrl+click adds a face or takes it out again. Draw a new rectangle to mark another face.',
+        );
+      }
       if (this.selectedFace) {
-        return t('memories', 'Draw a new rectangle to mark another face.');
+        return t(
+          'memories',
+          'Draw a new rectangle to mark another face. Ctrl+click selects several faces, to ignore or delete them together.',
+        );
       }
       if (this.rect) {
         return t('memories', 'Enter a name, or save without one. You can redraw by dragging again.');
       }
       return t(
         'memories',
-        'Drag on the photo to mark a face, or an area with several faces to search again. Zoom with the mouse wheel or two fingers, and move with the middle mouse button or two fingers. Click a face to see its state or rename it.',
+        'Drag on the photo to mark a face, or an area with several faces to search again. Zoom with the mouse wheel or two fingers, and move with the middle mouse button or two fingers. Click a face to see its state or rename it, Ctrl+click to select several.',
       );
     },
 
     stageFaces(): StageFace[] {
       if (!this.dimensionsKnown) return [];
       return this.faces.map((face) =>
-        stageFaceOf(face, this.imageNatW, this.imageNatH, this.limits, face.id === this.selectedFaceId),
+        stageFaceOf(face, this.imageNatW, this.imageNatH, this.limits, this.selectedFaceIds.includes(face.id)),
       );
     },
 
@@ -344,8 +396,62 @@ export default defineComponent({
       return regionScope();
     },
 
+    /** The faces selected that are on the photo, in the order they were picked. */
+    selectedFaces(): IFaceRectForFile[] {
+      return this.selectedFaceIds
+        .map((id) => this.faces.find((face) => face.id === id))
+        .filter((face): face is IFaceRectForFile => !!face);
+    },
+
+    /** The one face selected, or null when there is none or there are several. */
     selectedFace(): IFaceRectForFile | null {
-      return this.faces.find((face) => face.id === this.selectedFaceId) ?? null;
+      return this.selectedFaces.length === 1 ? this.selectedFaces[0] : null;
+    },
+
+    selectedIgnored(): boolean {
+      return !!this.selectedFace && isIgnored(this.selectedFace);
+    },
+
+    /** Only what was put there by hand can be deleted, and all of the selection or nothing. */
+    canDeleteSelection(): boolean {
+      return !this.legacy && this.selectedFaces.length > 0 && this.selectedFaces.every(canDelete);
+    },
+
+    canIgnoreSelection(): boolean {
+      return !this.legacy && this.selectedFaces.some((face) => !isIgnored(face));
+    },
+
+    canUnignoreSelection(): boolean {
+      return !this.legacy && this.selectedFaces.length > 0 && this.selectedFaces.every(isIgnored);
+    },
+
+    deleteLabel(): string {
+      const count = this.selectedFaces.length;
+      return this.confirmDelete
+        ? n('memories', 'Really delete {count} face', 'Really delete {count} faces', count, { count })
+        : t('memories', 'Delete');
+    },
+
+    /** What is worth knowing about the faces selected together. */
+    selectionNotes(): string[] {
+      const notes: string[] = [];
+      if (!this.legacy && this.selectedFaces.some((face) => !canDelete(face))) {
+        notes.push(
+          t(
+            'memories',
+            'Faces found by the automatic analysis cannot be deleted, since its next run on the photo would find them again. They can be ignored.',
+          ),
+        );
+      }
+      if (this.canIgnoreSelection) {
+        notes.push(
+          t(
+            'memories',
+            'Ignored faces stay on the photo, faintly, but they are nobody: they do not show among the people, and the automatic recognition leaves them alone.',
+          ),
+        );
+      }
+      return notes;
     },
 
     selectedParticipation(): string {
@@ -494,9 +600,7 @@ export default defineComponent({
         this.regions = result.regions;
         this.limits = result.limits;
         this.legacy = result.legacy;
-        if (this.selectedFaceId !== null && !this.selectedFace) {
-          this.selectedFaceId = null;
-        }
+        this.selectedFaceIds = this.selectedFaceIds.filter((id) => this.faces.some((face) => face.id === id));
       } catch (e) {
         console.error(e);
         if (fileId !== this.fileId) return;
@@ -543,7 +647,8 @@ export default defineComponent({
       this.rawInput = '';
       this.saving = false;
       this.saveError = '';
-      this.selectedFaceId = null;
+      this.selectedFaceIds = [];
+      this.confirmDelete = false;
       this.editName = '';
       this.wholeGroup = false;
       window.clearTimeout(this.noticeTimer);
@@ -633,30 +738,114 @@ export default defineComponent({
     onRect(rect: Rect | null) {
       this.rect = rect;
       if (rect) {
-        this.selectedFaceId = null;
+        this.selectedFaceIds = [];
+        this.confirmDelete = false;
         this.saveError = '';
         this.focusField('nameField');
       }
     },
 
-    selectFace(faceId: number) {
+    /**
+     * Selects a face, or with Ctrl+click adds it to the faces selected or
+     * takes it out of them.
+     */
+    selectFace(faceId: number, additive = false) {
       // While saving, the rectangle has to stay, to try again if it fails.
       if (this.saving) return;
-      const face = this.faces.find((f) => f.id === faceId);
-      if (!face) return;
+      if (!this.faces.some((f) => f.id === faceId)) return;
       this.rect = null;
       this.saveError = '';
-      this.selectedFaceId = faceId;
-      this.editName = face.personName ?? '';
+      this.confirmDelete = false;
+      if (additive) {
+        this.selectedFaceIds = this.selectedFaceIds.includes(faceId)
+          ? this.selectedFaceIds.filter((id) => id !== faceId)
+          : [...this.selectedFaceIds, faceId];
+      } else {
+        this.selectedFaceIds = [faceId];
+      }
+      // A single face can be named, and the field starts with its name.
+      const single = this.selectedFace;
+      this.editName = single?.personName ?? '';
       // Only this face, unless the user says otherwise.
       this.wholeGroup = false;
-      this.focusField('editField');
+      if (single) this.focusField('editField');
     },
 
     cancelEdit() {
-      this.selectedFaceId = null;
+      this.selectedFaceIds = [];
+      this.confirmDelete = false;
       this.editName = '';
       this.saveError = '';
+    },
+
+    /** Deletes the faces selected, on the second click: the first one asks. */
+    async deleteSelected(): Promise<void> {
+      if (!this.canDeleteSelection) return;
+      if (!this.confirmDelete) {
+        this.confirmDelete = true;
+        return;
+      }
+      await this.changeSelected(
+        faceRecognitionDeleteFaces,
+        (count) => n('memories', '{count} face deleted.', '{count} faces deleted.', count, { count }),
+        t('memories', 'The faces could not be deleted.'),
+      );
+    },
+
+    async ignoreSelected(): Promise<void> {
+      if (!this.canIgnoreSelection) return;
+      await this.changeSelected(
+        faceRecognitionIgnoreFaces,
+        (count) => n('memories', '{count} face ignored.', '{count} faces ignored.', count, { count }),
+        t('memories', 'The faces could not be ignored.'),
+      );
+    },
+
+    async unignoreSelected(): Promise<void> {
+      if (!this.canUnignoreSelection) return;
+      await this.changeSelected(
+        faceRecognitionUnignoreFaces,
+        (count) =>
+          n(
+            'memories',
+            '{count} face is not ignored any more. The face recognition places it on its next run.',
+            '{count} faces are not ignored any more. The face recognition places them on its next run.',
+            count,
+            { count },
+          ),
+        t('memories', 'The faces could not be changed.'),
+      );
+    },
+
+    /**
+     * Sends the faces selected to the server, shows what came of it, and
+     * reads the faces of the photo again. On a failure the selection stays,
+     * to try again.
+     */
+    async changeSelected(
+      call: (faceIds: number[]) => Promise<{ faceIds: number[] }>,
+      done: (count: number) => string,
+      failed: string,
+    ): Promise<void> {
+      const faceIds = this.selectedFaces.map((face) => face.id);
+      if (!faceIds.length || this.saving) return;
+      this.saving = true;
+      this.saveError = '';
+      try {
+        const result = await call(faceIds);
+        this.showNotice(done(result.faceIds?.length ?? faceIds.length));
+        this.selectedFaceIds = [];
+        this.confirmDelete = false;
+        this.changed = true;
+      } catch (e) {
+        console.error(e);
+        this.saveError = this.errorText(e, failed);
+        this.confirmDelete = false;
+        return;
+      } finally {
+        this.saving = false;
+      }
+      await this.loadFaces();
     },
 
     /** The rectangle as the server takes it, measured against the original. */
@@ -747,7 +936,7 @@ export default defineComponent({
               : t('memories', 'Face reassigned to "{name}".', { name: target }),
           );
         }
-        this.selectedFaceId = null;
+        this.selectedFaceIds = [];
         this.editName = '';
         this.changed = true;
       } catch (e) {
@@ -871,6 +1060,10 @@ export default defineComponent({
     &.line-excluded {
       border-style: dotted;
       border-width: 3px;
+    }
+    &.ignored {
+      border: 1px dotted #95a5a6;
+      opacity: 0.6;
     }
   }
 }

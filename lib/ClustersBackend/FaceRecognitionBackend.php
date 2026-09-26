@@ -328,6 +328,12 @@ final class FaceRecognitionBackend extends Backend
         // WHERE the cluster has not been assigned to a person yet
         $query->andWhere($query->expr()->isNull('frc.person'));
 
+        // WHERE these clusters were not hidden, by inconsistencies or by the
+        // user ignoring them, also in the people of a single photo: an
+        // ignored face is in a hidden cluster of its own. A boolean
+        // parameter, since PostgreSQL has no = between boolean and integer.
+        $query->andWhere($query->expr()->eq('frc.is_visible', $query->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)));
+
         // The query change if we want the people in an fileid, or the unnamed clusters
         if ($fileid > 0) {
             // WHERE these clusters contain fileid if specified
@@ -335,8 +341,6 @@ final class FaceRecognitionBackend extends Backend
         } else {
             // WHERE these clusters has a minimum number of faces
             $query->having($query->expr()->gte($count, SQL::literal($query, $this->minFaceInClusters(), \PDO::PARAM_INT)));
-            // WHERE these clusters were not hidden due inconsistencies
-            $query->andWhere($query->expr()->eq('frc.is_visible', $query->expr()->literal(1)));
         }
 
         // ORDER by number of faces in cluster and id for response stability.

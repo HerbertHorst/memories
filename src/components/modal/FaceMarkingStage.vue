@@ -37,11 +37,11 @@
           tabindex="0"
           role="button"
           :aria-label="face.title"
-          @click.stop="$emit('select', face.id)"
-          @keydown.enter.prevent.stop="$emit('select', face.id)"
-          @keydown.space.prevent.stop="$emit('select', face.id)"
+          @click.stop="$emit('select', face.id, $event.ctrlKey || $event.metaKey)"
+          @keydown.enter.prevent.stop="$emit('select', face.id, $event.ctrlKey || $event.metaKey)"
+          @keydown.space.prevent.stop="$emit('select', face.id, $event.ctrlKey || $event.metaKey)"
         >
-          <span class="label">{{ face.label }}</span>
+          <span v-if="face.label" class="label">{{ face.label }}</span>
         </div>
 
         <div v-if="shownRect" class="face-box drawing" :style="toCss(shownRect)" />
@@ -120,7 +120,8 @@ export default defineComponent({
 
   emits: {
     'update:rect': (_rect: Rect | null) => true,
-    select: (_faceId: number) => true,
+    /** A face was clicked; with Ctrl (Cmd on a Mac) it is added to the ones selected, or taken out */
+    select: (_faceId: number, _additive: boolean) => true,
     'navigation-error': () => true,
     'image-error': () => true,
   },
@@ -496,6 +497,18 @@ export default defineComponent({
     &.clustering-unknown {
       border-style: double;
       border-width: 4px;
+    }
+
+    // An ignored face is only there faintly, whatever it is otherwise.
+    &.ignored {
+      border: 1px dotted rgba(236, 240, 241, 0.8);
+      box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25);
+      opacity: 0.55;
+
+      &:hover,
+      &.selected {
+        opacity: 1;
+      }
     }
 
     &.selected,

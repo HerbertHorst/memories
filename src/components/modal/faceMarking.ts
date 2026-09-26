@@ -71,7 +71,22 @@ export function clusteringOf(face: IFaceRectForFile): FaceClusteringLook {
   return 'unknown';
 }
 
+/** Whether the user ignored the face: it is nobody, and takes no part in the recognition. */
+export function isIgnored(face: IFaceRectForFile): boolean {
+  return face.ignored === true || face.excludedReason === 'ignored';
+}
+
+/**
+ * Whether the face can be deleted: only what was put there by hand, a marking
+ * or a face found in a searched area. A face of the analysis would come back
+ * with its next analysis of the photo, so it can only be ignored.
+ */
+export function canDelete(face: IFaceRectForFile): boolean {
+  return originOf(face) === 'manual';
+}
+
 export function nameOf(face: IFaceRectForFile): string {
+  if (isIgnored(face)) return t('memories', 'Ignored face');
   return face.personName || t('memories', 'Unnamed person');
 }
 
@@ -131,6 +146,11 @@ export function participationText(face: IFaceRectForFile, limits: IFaceLimits | 
       );
     case 'detached':
       return t('memories', 'Assigned to a person by hand, so the automatic recognition leaves it alone.');
+    case 'ignored':
+      return t(
+        'memories',
+        'Ignored: it is nobody, it does not show among the people, and the automatic recognition leaves it alone.',
+      );
     default:
       return t('memories', 'Not used for the automatic recognition (unknown reason: {reason}).', {
         reason: String(face.excludedReason),
@@ -167,13 +187,22 @@ export function stageFaceOf(
   selected: boolean,
 ): StageFace {
   const origin = originOf(face);
+  const ignored = isIgnored(face);
   return {
     id: face.id,
     rect: fractionsOf(face, width, height),
-    classes: ['existing', `origin-${origin}`, `clustering-${clusteringOf(face)}`, ...(selected ? ['selected'] : [])],
+    classes: [
+      'existing',
+      `origin-${origin}`,
+      `clustering-${clusteringOf(face)}`,
+      ...(ignored ? ['ignored'] : []),
+      ...(selected ? ['selected'] : []),
+    ],
     title: titleOf(face, limits),
-    // Marked by hand shows without colours too.
-    label: (origin === 'manual' ? '✎ ' : '') + (face.personName || '?'),
+    // An ignored face is only a faint box, without a label that would clutter
+    // the photo when there are many of them. Marked by hand shows without
+    // colours too.
+    label: ignored ? '' : (origin === 'manual' ? '✎ ' : '') + (face.personName || '?'),
   };
 }
 
