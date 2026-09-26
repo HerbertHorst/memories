@@ -311,3 +311,53 @@ export function reassignScope(name: string, wholeGroup: boolean, groupSize: numb
     { name },
   );
 }
+
+/** How often, and how far apart, a field that is still loading is looked for */
+const FOCUS_TRIES = 20;
+const FOCUS_RETRY_MS = 50;
+
+/**
+ * Puts the cursor in a field without scrolling to it: the fields appear
+ * below the photo while the user is still looking at it. Only with a mouse;
+ * on a touch screen the keyboard would cover the photo. NcTextField is
+ * loaded on first use, so the field is looked for a few times.
+ */
+export function focusWithoutScrolling(find: () => HTMLInputElement | null | undefined): void {
+  if (!window.matchMedia?.('(pointer: fine)').matches) return;
+  let tries = FOCUS_TRIES;
+  const attempt = () => {
+    const input = find();
+    if (input) {
+      input.focus({ preventScroll: true });
+    } else if (--tries > 0) {
+      window.setTimeout(attempt, FOCUS_RETRY_MS);
+    }
+  };
+  attempt();
+}
+
+/** The input of an NcTextField given as a ref, once it has loaded. */
+export function inputOf(field: unknown): HTMLInputElement | null {
+  const el = (field as { $el?: Element } | undefined)?.$el;
+  return el?.querySelector?.('input') ?? null;
+}
+
+/** The answer of the server that came with a failed request, if there was one. */
+function responseOf(e: unknown): { status?: number; data?: { error?: unknown } } | null {
+  if (typeof e !== 'object' || e === null || !('response' in e)) return null;
+  const response = (e as { response?: unknown }).response;
+  return typeof response === 'object' && response !== null ? response : null;
+}
+
+/** What went wrong with a call to the server, in words. */
+export function errorText(e: unknown, fallback: string): string {
+  const response = responseOf(e);
+  if (response?.status === 503) {
+    return t('memories', 'Face Recognition on the server has to be updated first.');
+  }
+  if (response?.status === 409) {
+    return t('memories', 'The face has moved to another group in the meantime. Please check it and try again.');
+  }
+  const detail = response?.data?.error;
+  return detail ? `${fallback} (${String(detail)})` : fallback;
+}
