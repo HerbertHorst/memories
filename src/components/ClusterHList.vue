@@ -11,7 +11,7 @@
       <div
         class="item cluster--rounded"
         :class="{ 'cluster--circle': circle(item) }"
-        :key="item.cluster_id"
+        :key="dav.getClusterKey(item)"
         v-for="item of clusters"
       >
         <Cluster :data="item" :link="true" :counters="!routeIs.Explore" />
@@ -25,6 +25,8 @@ import { t } from '@services/l10n';
 import { routeIs } from '@services/router';
 
 import Cluster from '@components/frame/Cluster.vue';
+
+import * as dav from '@services/dav';
 
 import type { ICluster } from '@typings';
 

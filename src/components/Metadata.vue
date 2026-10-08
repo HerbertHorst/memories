@@ -15,7 +15,7 @@
 
     <div v-if="people.length" class="people">
       <div class="section-title">{{ t('memories', 'People') }}</div>
-      <div class="container" v-for="face of people" :key="face.cluster_id">
+      <div class="container" v-for="face of people" :key="dav.getClusterKey(face)">
         <Cluster class="cluster--rounded" :data="face" :counters="false"> </Cluster>
       </div>
     </div>
@@ -34,7 +34,7 @@
         {{ t('memories', 'Face Recognition is unavailable. The app may need an update to match its database schema.') }}
       </div>
       <template v-else-if="facerecognitionPeople.length">
-        <div class="container" v-for="face of facerecognitionPeople" :key="face.cluster_id">
+        <div class="container" v-for="face of facerecognitionPeople" :key="dav.getClusterKey(face)">
           <Cluster class="cluster--rounded" :data="face" :counters="false"> </Cluster>
         </div>
       </template>
