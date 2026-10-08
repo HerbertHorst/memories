@@ -3,7 +3,7 @@
     ref="recycler"
     tabindex="1"
     type-field="cluster_type"
-    key-field="cluster_id"
+    :key-field="dav.getClusterKey"
     class="grid-recycler hide-scrollbar-mobile"
     :class="classList"
     :items="clusters"
@@ -35,6 +35,7 @@ import { windowDims } from '@services/viewport';
 
 import Cluster from '@components/frame/Cluster.vue';
 
+import * as dav from '@services/dav';
 import * as utils from '@services/utils/common';
 
 import type { ICluster } from '@typings';

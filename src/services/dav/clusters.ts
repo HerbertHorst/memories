@@ -14,6 +14,16 @@ export const clusterIs = {
 };
 
 /**
+ * Get a key that is unique within a list of clusters.
+ * Faces of other users in shared photos can carry the same id
+ * (Face Recognition uses the person name), so qualify them by user.
+ * @param cluster Cluster object
+ */
+export function getClusterKey(cluster: ICluster): string | number {
+  return clusterIs.face(cluster) ? `${cluster.user_id}/${cluster.cluster_id}` : cluster.cluster_id;
+}
+
+/**
  * Get the preview URL for a cluster
  * @param cluster Cluster object
  */
